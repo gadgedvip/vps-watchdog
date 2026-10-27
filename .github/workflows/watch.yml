@@ -1,0 +1,55 @@
+name: watch
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  issues: write
+  contents: read
+
+concurrency:
+  group: watch
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    env:
+      GH_TOKEN: ${{ github.token }}
+      URL: ${{ secrets.WATCH_URL }}
+      BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+      CHAT_ID: ${{ secrets.CHAT_ID }}
+    steps:
+      - name: Probe, then announce a change of state only
+        run: |
+          say() {
+            curl -s -m 20 -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+              --data-urlencode "chat_id=${CHAT_ID}" --data-urlencode "text=$1" >/dev/null
+          }
+          ok=0; code=none
+          for i in 1 2 3; do
+            body=$(curl -s -m 15 -w '\n%{http_code}' "$URL" || true)
+            code=$(printf '%s' "$body" | tail -n 1)
+            if [ "$code" = "200" ] && printf '%s' "$body" | grep -q '"ok": *true'; then ok=1; break; fi
+            sleep 20
+          done
+          open=$(gh issue list --repo "$GITHUB_REPOSITORY" --label vps-down --state open --json number -q '.[0].number')
+          now=$(TZ=Asia/Ho_Chi_Minh date '+%H:%M %d/%m')
+          if [ "$ok" = "1" ]; then
+            if [ -n "$open" ]; then
+              say "🟢 VPS đã phản hồi lại lúc $now (giờ VN)."
+              gh issue close "$open" --repo "$GITHUB_REPOSITORY" --comment "Phản hồi lại lúc $now" >/dev/null
+            fi
+          else
+            if [ -z "$open" ]; then
+              say "🔴 VPS không phản hồi từ khoảng $now (giờ VN), mã ${code}. Bot, email Support/HR và báo cáo có thể đang dừng. Kiểm tra nhà cung cấp VPS hoặc Tailscale."
+              gh label create vps-down --repo "$GITHUB_REPOSITORY" --color B60205 >/dev/null 2>&1 || true
+              gh issue create --repo "$GITHUB_REPOSITORY" --label vps-down --title "VPS không phản hồi" --body "Bắt đầu lúc $now (giờ VN)." >/dev/null
+            fi
+          fi
+      - name: Keep the schedule alive (GitHub pauses idle public repos after 60 days)
+        run: gh api -X PUT "repos/$GITHUB_REPOSITORY/actions/workflows/watch.yml/enable" >/dev/null || true
